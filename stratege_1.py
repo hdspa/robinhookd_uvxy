@@ -62,44 +62,45 @@ def initialize(context):
               pre_func=addFieldsVXV,
               post_func=shift_data)
 
-    context.xiv = sid(40516)
-    context.tqqq = sid(39214)
-    context.uvxy = sid(41969)
-    context.spyg = sid(22009)
+    context.SVXY = symbol('SVXY')
+    context.tqqq = symbol('TQQQ')
+    context.uvxy = symbol('UVXY')
+    context.spyg = symbol('SPYG')
     
     context.vix = -1
-    context.xiv_day = 0
-    #set_benchmark(context.xiv) # careful, ALPHA BETA SHARPE will be different
-    set_slippage(slippage.VolumeShareSlippage(volume_limit=.20, price_impact=0.0))
-    set_commission(commission.PerTrade(cost=0.00))
+    context.SVXY_day = 0
+    set_benchmark(symbol('SVXY')) # ALPHA and BETA will be different
     
-    context.SetAsideLeverageTotal = 0.20 # 100% allocate when BigSignalTQQQ
+    context.SetAsideLeverageTotal = 0.666 # 100% allocate when BigSignalTQQQ
     context.VIX_GrowthLeverage    = 1 - context.SetAsideLeverageTotal
-    context.VIX_MinHedgeLeverage  = 0.666 # unless all positive conditions are met
-    context.VIX_MaxHedgeLeverage  = 1.00 # if certain conditions are met
+    context.VIX_MinHedgeLeverage  = context.VIX_HedgeLeverage  = 0.666
+    context.VIX_MaxHedgeLeverage  = 0.666 # if certain conditions are met
     context.ShowMaxLev            = True
 
     # 3x NASDAQ nonfinancial, generally profitable
     context.SetAsideStocks = symbols('TQQQ')
 
-    context.XIV       = symbol('XIV')
+    context.PriceSVXY = context.PriceUVXY = 0.00
+    context.BoughtShortVIX = context.BoughtLongVIX = False
+    context.SVXY       = symbol('SVXY')
     context.UVXY      = symbol('UVXY') # approx 8% weekly erosion, bigger spikes
-    context.VIXstocks = (context.XIV, context.UVXY)
+    context.VIXstocks = (context.SVXY, context.UVXY)
     context.LongVIX  = False  # no decisions until one of three conditions exists
     context.ShortVIX = False  # no decisions until one of three conditions exists
+    context.Agree     = False
     # not necessary to set BigSignal variables because they get set by MoreSignals function early every day
     
     # apparently highly successful VIX signals
     schedule_function(CherryPickerOpen, date_rules.every_day(), time_rules.market_open(), False)
     schedule_function(MoreSignals, date_rules.every_day(), time_rules.market_open(minutes = 2))
     schedule_function(Rebalance, date_rules.every_day(), time_rules.market_open(minutes = 4))
+    schedule_function(CherryPickerClose, date_rules.every_day(), time_rules.market_open(minutes = 120), False)
     schedule_function(RogueTrader, date_rules.every_day(),time_rules.market_open(minutes = 60))
     schedule_function(cancel_open_orders, date_rules.every_day(), time_rules.market_close())    
     schedule_function(RecordVars, date_rules.every_day(), time_rules.market_close())    
-    schedule_function(CherryPickerClose, date_rules.every_day(), time_rules.market_close(), False)
 
-    #VXX used for strategy to buy XIV
-    context.VXX = context.vxx = sid(38054) # VXX
+    #VXX used for strategy to buy SVXY
+    context.VXX = context.vxx = symbol('VXX') # VXX
 
     #Editable values to tweak backtest
     context.AvgLength = 20
@@ -129,7 +130,7 @@ def before_trading_start(context, data):
 
     # To help determine previous signal when start algo in live trade Robinhood
     if not context.ShortVIX and not context.LongVIX: # Maybe we can figure it out
-        context.ShortVIX = True if 0 < context.portfolio.positions[context.XIV].amount  else False
+        context.ShortVIX = True if 0 < context.portfolio.positions[context.SVXY].amount else False
         context.LongVIX  = True if 0 < context.portfolio.positions[context.UVXY].amount else False
         if context.ShortVIX and context.LongVIX: # Do no harm
             context.ShortVIX = context.LongVIX = False
@@ -145,47 +146,97 @@ def CherryPickerOpen(context,data):
     c = context
     if c.sell:
         c.sell = False
-        if c.portfolio.positions[c.XIV].amount > 0: 
-            cancel_open_orders_for(context, data, c.XIV)
-            TarPer(context, data, c.XIV, 0.00)
+        if c.portfolio.positions[c.SVXY].amount > 0: 
+            cancel_open_orders_for(context, data, c.SVXY)
+            TarPer(context, data, c.SVXY, 0.00)
             
 def RogueTrader(context, data):
 
-    context.RogueTrader = True # Not True until RogueTrader scheduled function runs
+    c = context
+    c.RogueTrader = True # Not True until RogueTrader scheduled function runs
 
     cancel_open_orders(context, data)
 
-    for stock in context.portfolio.positions:
+    ##
+    # Limit sell and Stop loss orders
+    ##
+    for stock in c.portfolio.positions:
 
         # Set stoploss
-        context.stoploss = 0.21 if stock is context.UVXY else 0.035
+        c.stoploss = 0.21 if stock is c.UVXY else 0.035
 
         # Set LimitPrice for first order
-        RemainingFactor  = 0.50 if stock is context.UVXY else 0.22
-        MaxOrders        = 20   if stock is context.UVXY else 3
-        if stock is context.UVXY:
-            LimitPriceFactor = 1.06 if context.Agree else 1.05
+        RemainingFactor  = 0.50 if stock is c.UVXY else 0.22
+        MaxOrders        = 20   if stock is c.UVXY else 3
+        if stock is c.UVXY:
+            LimitPriceFactor = 1.06 if c.Agree else 1.05
         else:
             LimitPriceFactor = 1.04
-        LimitPrice       = LimitPriceFactor * context.portfolio.positions[stock].cost_basis
+        LimitPrice       = LimitPriceFactor * c.portfolio.positions[stock].cost_basis
 
-        SharesRemaining = int(RemainingFactor * context.portfolio.positions[stock].amount)
+        SharesRemaining = int(RemainingFactor * c.portfolio.positions[stock].amount)
         SharesPerOrder  = min(SharesRemaining, max(100, int(SharesRemaining / MaxOrders)))
         
         while 0 < SharesRemaining:
 
             order(stock, -SharesPerOrder, style=LimitOrder(LimitPrice))
+            log.info('order ' + stock.symbol + ' ' + str(-SharesPerOrder) + ' LimitPrice ' + str(LimitPrice))
             
             SharesRemaining -= SharesPerOrder
             SharesPerOrder = min(SharesRemaining, SharesPerOrder)
             LimitPrice *= LimitPriceFactor 
-        if stock.symbol in context.stops: del context.stops[stock.symbol]
-        
+        if stock.symbol in c.stops: del c.stops[stock.symbol]
+
+def CherryPickerClose(context,data):    
+    
+    c = context
+    vxx_prices = data.history(c.VXX, "high", c.wvf_length*2, "1d")
+    vxx_lows = data.history(c.VXX, "low", c.wvf_length*2, "1d")
+    vxx_highest = vxx_prices.rolling(window = c.wvf_length, center=False).max()
+    WVF = ((vxx_highest - vxx_lows)/(vxx_highest)) * 100
+
+    rsi = talib.RSI(vxx_prices, timeperiod=c.rsi_length)
+    
+    c.SmoothedWVF1 = talib.EMA(WVF, timeperiod=c.ema1) 
+    c.SmoothedWVF2 = talib.EMA(WVF, timeperiod=c.ema2)
+    
+    ## BUY RULES
+    #if WVF crosses over smoothwvf1 and wvf < smoothwvf2
+    if (
+        (WVF[-1] > c.SmoothedWVF1[-1] and WVF[-2] < c.SmoothedWVF1[-2] and WVF[-1] < c.SmoothedWVF2[-1])
+        or
+        (c.SmoothedWVF1[-2] < c.SmoothedWVF2[-2] and c.SmoothedWVF1[-1] > c.SmoothedWVF2[-1])
+        or
+        (WVF[-1] > c.SmoothedWVF1[-1] and WVF[-2] < c.SmoothedWVF1[-2] and WVF[-1] > c.SmoothedWVF2[-1] and WVF[-2] < c.SmoothedWVF2[-2])
+    ):
+        c.sell = False
+        for stock in c.portfolio.positions:
+            if stock is not c.SVXY:
+                cancel_open_orders_for(context, data, stock)
+                TarPer(context, data, stock, 0.00)
+            else:
+                cancel_open_orders_for(context, data, stock)
+                TarPer(context, data, stock, 1-c.VIX_GrowthLeverage)
+      
+    ## SELL RULES
+    if c.portfolio.positions[c.SVXY].amount > 0:
+        #if rsi crosses over rsi_trigger
+        if rsi[-2] < c.rsi_trigger and rsi[-1] > c.rsi_trigger:
+            c.sell = True
+            
+        #if wvf crosses under smoothwvf2: sell
+        elif WVF[-2] > c.SmoothedWVF2[-2] and WVF[-1] < c.SmoothedWVF2[-1]:
+            c.sell = True
+
+        else:
+            c.sell = False
+
 def Rebalance(context, data):
     c = context
     
     if 0 < c.SellAndWait:
         c.SellAndWait -= 1
+        log.info('! Sell and wait')
         return
 
     cancel_open_orders(context, data) # avoid confusion
@@ -202,7 +253,7 @@ def Rebalance(context, data):
                     hist['low'],  
                     hist['close'],  
                     timeperiod=3)[-1]
-    VIX_HedgeLeverage = c.VIX_MaxHedgeLeverage if atr_3 <= atr_14 else c.VIX_MinHedgeLeverage
+    c.VIX_HedgeLeverage = c.VIX_MaxHedgeLeverage if atr_3 <= atr_14 else c.VIX_MinHedgeLeverage
 
     #Gets Moving Average of VXX
     price_hist = data.history(c.vxx, 'price', c.AvgLength, '1d')
@@ -238,26 +289,33 @@ def Rebalance(context, data):
     #SignalShortVIX 
     if ( wvf_crossedSmoothedWVF1 and WVF[-1] < c.SmoothedWVF2[-1]) or (wvf_crossedSmoothedWVF2 and wvf_crossedSmoothedWVF1):
         SignalShortVIX = True
+        log.info('! SignalShortVIX = True')
     elif ((vxxPrice > c.vxxAvg and vxx_prices[-2] < c.vxxAvg) or (WVF[-1] < c.SmoothedWVF2[-1] and WVF[-2] > c.SmoothedWVF2[-1])):
         SignalShortVIX = False
+        log.info('! SignalShortVIX = False')
     else:
         SignalShortVIX = True
+        log.info('! SignalShortVIX = True')
 
     if (c.BigSignalShortVIX and SignalShortVIX): # Agree ShortVIX
+        log.info('! BigSignalShortVIX and SignalShortVIX = True : agreement Short VIX true')
         c.ShortVIX    = True
         c.LongVIX     = False
         c.Agree       = True
 
     elif (c.BigSignalLongVIX and not SignalShortVIX): # Agree LongVIX
+        log.info('! BigSignalLongVIX and NOT SignalShortVIX = True : agreement Long VIX true')
         c.ShortVIX    = False
         c.LongVIX     = True
         c.Agree       = True
 
     elif (c.BigSignalLongVIX and SignalShortVIX): # Not Agree LongVIX
+        log.info('! BigSignalLongVIX and SignalShortVIX = True : NO agreement: -- what to do? Lets go for UVXY....')
         c.ShortVIX    = False
         c.LongVIX     = True
         c.Agree       = False
-
+        
+        
     for stock in c.portfolio.positions:
         if stock not in c.VIXstocks and stock not in c.SetAsideStocks:
             TarPer(context, data, stock, 0.00)
@@ -273,8 +331,8 @@ def Rebalance(context, data):
     p = c.portfolio.positions
 
     if c.BigSignalTQQQ:
-        if LevTooLow or (c.XIV in p or c.UVXY in p):
-            TarPer(context, data, c.XIV, 0.00)
+        if LevTooLow or (c.SVXY in p or c.UVXY in p):
+            TarPer(context, data, c.SVXY, 0.00)
             TarPer(context, data, c.UVXY, 0.00)
             SetAsideStocks = c.SetAsideStocks
             SetAsideLeveragePositions = len(SetAsideStocks)
@@ -287,9 +345,8 @@ def Rebalance(context, data):
                 TarPer(context, data, stock, SetAsideLeverage)
 
     elif c.ShortVIX:
-        if LevTooLow or (c.XIV not in p):
+        if LevTooLow or (c.SVXY not in p):
             TarPer(context, data, c.UVXY, 0.00)
-            TarPer(context, data, c.XIV, c.VIX_GrowthLeverage)
             SetAsideStocks = c.SetAsideStocks
             SetAsideLeveragePositions = len(SetAsideStocks)
             for stock in SetAsideStocks:
@@ -299,19 +356,22 @@ def Rebalance(context, data):
             SetAsideLeverage = float(c.SetAsideLeverageTotal / SetAsideLeveragePositions) if 0 < SetAsideLeveragePositions else 0.00
             for stock in SetAsideStocks:
                 TarPer(context, data, stock, SetAsideLeverage)
+            c.BoughtShortVIX = False
+            c.PriceSVXY = 0.00
 
     elif c.LongVIX:
         if LevTooLow or (c.UVXY not in p):
-            TarPer(context, data, c.XIV, 0.00)
-            TarPer(context, data, c.UVXY, VIX_HedgeLeverage)
+            TarPer(context, data, c.SVXY, 0.00)
             for stock in c.SetAsideStocks:
                 TarPer(context, data, stock, 0.00)
+            c.BoughtLongVIX = False
+            c.PriceUVXY = 0.00
 
     # Record / log stuff I want to know
-    c.XIVprice  = data.current(c.XIV, 'price')
+    c.SVXYprice = data.current(c.SVXY, 'price')
     c.UVXYprice = data.current(c.UVXY, 'price')
     TQQQprice = data.current(c.tqqq, 'price')
-    #record(XIV  = c.XIVprice)
+    #record(SVXY = c.SVXYprice)
     #record(UVXY = c.UVXYprice)
     #record(TQQQ = TQQQprice)
     BigSignal = 'NoBigSignal'
@@ -321,8 +381,8 @@ def Rebalance(context, data):
     SyntheticVIX = 'NoSyntheticVIX'
     SyntheticVIX = 'ShortVIX' if c.ShortVIX else SyntheticVIX
     SyntheticVIX = ' LongVIX' if c.LongVIX  else SyntheticVIX
-    log.info('BigSignal / SyntheticVIX: {} / {}     VIX: {:.2f}     XIV: {:.2f}     UVXY: {:.2f}     TQQQ: {:.2f}'
-        .format(BigSignal, SyntheticVIX, c.VIXprice, c.XIVprice, c.UVXYprice, TQQQprice)
+    log.info('BigSignal/SyntheticVIX: {} / {}     VIX: {:.2f}     SVXY: {:.2f}     UVXY: {:.2f}     TQQQ: {:.2f}'
+        .format(BigSignal, SyntheticVIX, c.VIXprice, c.SVXYprice, c.UVXYprice, TQQQprice)
     )
 
 def TarPer(context, data, stock, TargetPercent):
@@ -331,24 +391,37 @@ def TarPer(context, data, stock, TargetPercent):
 
         if 0 == TargetPercent:
             order_target_percent(stock, 0.00)
+            log.info('order_target_percent ' + stock.symbol + ' 0.00')
         else:
             # Always want money available to withdraw 
             # and also try to prevent margin related order rejections
             PV = context.portfolio.portfolio_value
-            DoNotSpend = 2000 # How much cash for withdrawals
-            RhMargin = 24000.00 # Set to 0 if you do not have Robinhood Gold
-            RhMargin = min(RhMargin, PV * 0.33)
+            DoNotSpend = 200.00 # 200 Cushion plus cash for withdrawals
+            RhMargin = 0.00 # Set to 0 if you do not have Robinhood Gold
+            dispersion = data.current('v','20dstd')
+            if dispersion>1.0: 
+                MaxLeverage = 0.66 # Hard Limit for leverage minus seemingly necessary cushion
+            else:
+                MaxLeverage = 0.66
+            MaxLeverage = min(MaxLeverage, max(MaxLeverage, context.account.leverage))
+            RhMargin = min(RhMargin, PV * (MaxLeverage - 1))
             RhPV = PV + RhMargin - DoNotSpend  
+            RhCash = RhPV - context.portfolio.positions_value
             amount = context.portfolio.positions[stock].amount
             price = data.current(stock, 'price')
-            PosValue = float(amount * price)
-            NowLev = float(PosValue / RhPV)
-            LevAdjust = TargetPercent - NowLev
-            LevAdjust = 0 if 0 > LevAdjust and 0 == amount else LevAdjust
-            order_percent(stock, LevAdjust)
+            PosValue   = float(amount * price)
+            TarValue   = float(RhPV * TargetPercent)
+            DiffValue  = float(TarValue - PosValue)
+            DiffValue  = min(DiffValue, RhCash)
+            DiffAmount = int(DiffValue / price)
+            DiffAmount = 0 if 0 > DiffAmount and 0 == amount else DiffAmount
+            if 0 != DiffAmount:
+                order(stock, DiffAmount)
+                log.info('order ' + stock.symbol + ' ' + str(DiffAmount))
 
         if stock.symbol in context.stops: del context.stops[stock.symbol]
-
+            
+            
 def DataCanTrade(context, data, stock):
 
     try:
@@ -393,7 +466,10 @@ def MoreSignals(context, data):
     last_vx2 = data.current('v2','Close')      
     last_vxv = data.current('vxv', 'Close')
     last_vix_200ma_ratio = data.current('v', '200ma Ratio')
-           
+    dispersion = data.current('v','20dstd')
+    
+    record(dispersion=dispersion)
+    record(last_vix=last_vix/10)
     # Calculating the gap between spot vix and the first month vix future
     last_ratio_v_v1 = last_vix/last_vx1
 
@@ -420,15 +496,15 @@ def MoreSignals(context, data):
         vix_ratio = 0
     context.vix = last_vix
     
-    xiv_history = data.history(context.xiv, 'price', 2, '1d')  
+    SVXY_history = data.history(context.SVXY, 'price', 2, '1d')  
     
-    xiv_ratio = xiv_history[1]/xiv_history[0] - 1
+    SVXY_ratio = SVXY_history[1]/SVXY_history[0] - 1
     
     # Setting thresholds
     threshold_vix_too_low = 10.76   # 0 
     threshold_vix_200ma_ratio_low = 0.79  # 0 
-    threshold_xiv = -0.049          # 1
-    threshold_vxv_xiv = 0.87        # 2
+    threshold_SVXY = -0.049          # 1
+    threshold_vxv_SVXY = 0.87        # 2
     threshold_uvxy = 0.049          # 3
     threshold_macd = -0.55          # 3
     threshold_vxv_uvxy = 1.3        # 4
@@ -436,59 +512,70 @@ def MoreSignals(context, data):
     threshold_vc_low = -0.148       # 6
     threshold_vc_high = 0.046       # 8
     threshold_vc_high_2 = -0.06     # 8
-    threshold_xiv_ratio = -0.053    # 10
+    threshold_SVXY_ratio = -0.053    # 10
     threshold_uvxy_ratio = 0.08     # 11
-
+    threshold_dispersion = 0.55
     # 0
-    if last_vix < threshold_vix_too_low and last_vix_200ma_ratio < threshold_vix_200ma_ratio_low: # if VIX is too low, invest in UVXY witht he hope of a spike
+    if last_vix < threshold_vix_too_low \
+            and last_vix_200ma_ratio < threshold_vix_200ma_ratio_low :
+        log.info('! if VIX is too low, invest in UVXY witht he hope of a spike')
         target_sid = context.uvxy
     # 1        
-    elif last_ratio < threshold_xiv: # if contango is high, invest in XIV to gain from decay
-        target_sid = context.xiv
+    elif last_ratio < threshold_SVXY: # 
+        log.info('! if contango is high, invest in SVXY to gain from decay')
+        target_sid = context.SVXY
     
     # 2
-    elif vix_vxv_ratio < threshold_vxv_xiv: # if short term vol is low compared to mid term, invest in XIV to gain from decay
-        target_sid = context.xiv
+    elif vix_vxv_ratio < threshold_vxv_SVXY: # 
+        log.info('! if short term vol is low compared to mid term, invest in SVXY to gain from decay')
+        target_sid = context.SVXY
 
     # 3
-    elif last_ratio > threshold_uvxy and macd > threshold_macd: # if backwardation is high, invest in UVXY to gain from decay
+    elif last_ratio > threshold_uvxy and macd > threshold_macd: # 
+        log.info('! if backwardation is high, invest in UVXY to gain from decay')
         target_sid = context.uvxy
 
     # 4
-    elif vix_vxv_ratio > threshold_vxv_uvxy: # if short term vol is high compared to mid term, invest in UVXY to gain from growth
+    elif vix_vxv_ratio > threshold_vxv_uvxy: # 
+        log.info('! if short term vol is high compared to mid term, invest in UVXY to gain from growth')
         target_sid = context.uvxy
 
     # 5
-    elif last_vix > threshold_vix_high: # if VIX is too high, invest in XIV expecting that VIX will drop
-        target_sid = context.xiv
+    elif last_vix > threshold_vix_high: # 
+        log.info('! if VIX is too high, invest in SVXY expecting that VIX will drop')
+        target_sid = context.SVXY
 
     # 6
-    elif vix_ratio < threshold_vc_low: # Vix down sharply, invest in XIV expecting that futures curve gets pulled down
-        target_sid = context.xiv
+    elif vix_ratio < threshold_vc_low: # 
+        log.info('! Vix down sharply, invest in SVXY expecting that futures curve gets pulled down')
+        target_sid = context.SVXY
 
     # 7
-    elif vix_ratio > threshold_vc_high: # Vix up sharply, invest in UVXY expecting that futures curve gets pulled up
+    elif vix_ratio > threshold_vc_high: # 
+        log.info('! Vix up sharply, invest in UVXY expecting that futures curve gets pulled up')
         target_sid = context.uvxy
 
     # 8
-    elif vix_ratio > threshold_vc_high_2: #have to think
-        target_sid = context.xiv
+    elif vix_ratio > threshold_vc_high_2: #
+        log.info('! have to think')
+        target_sid = context.SVXY
 
     # 9
     else:
         target_sid = context.uvxy
+        log.info('! Going for UVXY...')
 
     # 10
-    if (target_sid == context.xiv and xiv_ratio < threshold_xiv_ratio) : 
-        # indicators say XIV but it just dropped overnight, so go for TQQQ
+    if (target_sid == context.SVXY and SVXY_ratio < threshold_SVXY_ratio) : 
+        log.info('! indicators say SVXY but it just dropped overnight, so go for TQQQ')
         target_sid = context.tqqq 
 
     # 11
-    elif (target_sid == context.uvxy and xiv_ratio > threshold_uvxy_ratio) :
-        # indicators say UVXY but it just dropped overnight, so go for TQQQ
+    elif (target_sid == context.uvxy and SVXY_ratio > threshold_uvxy_ratio) :
+        log.info('! indicators say UVXY but it just dropped overnight, so go for TQQQ')
         target_sid = context.tqqq
     
-    context.BigSignalShortVIX = True if context.xiv  is target_sid else False
+    context.BigSignalShortVIX = True if context.SVXY is target_sid else False
     context.BigSignalLongVIX  = True if context.uvxy is target_sid else False
     context.BigSignalTQQQ     = True if context.tqqq is target_sid else False
     
@@ -556,6 +643,7 @@ def addFieldsVIX(df):
     df = fix_close(df,'VIX Close')
     df['200ma'] = df['Close'].rolling(200).mean()
     df['200ma Ratio'] = df['Close'] / df['200ma']
+    df['20dstd'] =  df['Close'].rolling(20).std()
 
     return df
 
@@ -611,7 +699,7 @@ def pvr(context, data):
                 'logging'         : 0,    # Info to logging window with some new maximums  
                 'log_summary'     : 126,  # Summary every x days. 252/yr
 
-                'record_pvr'      : 1,    # Profit vs Risk returns (percentage)  
+                'record_pvr'      : 0,    # Profit vs Risk returns (percentage)  
                 'record_pvrp'     : 0,    # PvR (p)roportional neg cash vs portfolio value  
                 'record_cash'     : 1,    # Cash available  
                 'record_max_lvrg' : 0,    # Maximum leverage encountered  
@@ -620,7 +708,7 @@ def pvr(context, data):
                 'record_max_shrt' : 0,    # Max value of shorting total  
                 'record_cash_low' : 0,    # Any new lowest cash level  
                 'record_q_return' : 0,    # Quantopian returns (percentage)  
-                'record_pnl'      : 1,    # Profit-n-Loss  
+                'record_pnl'      : 0,    # Profit-n-Loss  
                 'record_risk'     : 1,    # Risked, max cash spent or shorts beyond longs+cash  
                 'record_leverage' : 0,    # End of day leverage (context.account.leverage)  
                 # All records are end-of-day or the last data sent to chart during any day.  
@@ -730,11 +818,35 @@ def pvr(context, data):
 
 def handle_data(context, data): 
     pvr(context, data)
-    c=context
+    c = context
     if c.ShowMaxLev:
         if c.account.leverage > c.mx_lvrg:  
             c.mx_lvrg = c.account.leverage  
             record(mx_lvrg = c.mx_lvrg)    # Record maximum leverage encountered
+
+    ##
+    # Buy SVXY
+    ##
+    if c.ShortVIX and not c.BoughtShortVIX and not c.SellAndWait:
+        PriceSVXY = data.current(c.SVXY, 'price')
+        if not c.PriceSVXY: c.PriceSVXY = PriceSVXY
+        if PriceSVXY < c.PriceSVXY * 0.985:
+            c.PriceSVXY = PriceSVXY
+        elif PriceSVXY > 1.0075 * c.PriceSVXY:
+            c.BoughtShortVIX = True
+            TarPer(context, data, c.SVXY, c.VIX_GrowthLeverage)
+
+    ##
+    # Buy UVXY
+    ##
+    if c.LongVIX and not c.BoughtLongVIX and not c.SellAndWait:
+        PriceUVXY = data.current(c.UVXY, 'price')
+        if not c.PriceUVXY: c.PriceUVXY = PriceUVXY
+        if PriceUVXY < c.PriceUVXY * 0.985:
+            c.PriceUVXY = PriceUVXY
+        elif PriceUVXY > 1.0025 * c.PriceUVXY:
+            c.BoughtLongVIX = True
+            TarPer(context, data, c.UVXY, c.VIX_HedgeLeverage)
 
     ##
     # RogueTrader here and in RogueTrader scheduled function
@@ -762,9 +874,9 @@ def handle_data(context, data):
             # Sell and Wait
             ##
             if (
-                    (position.sid is c.XIV and 0 < position.amount)
+                    (position.sid is c.SVXY and 0 < position.amount)
                     and
-                    (10.76 < c.vix < 12) and (position.last_sale_price > 1.013 * c.XIVprice)
+                    (10.76 < c.vix < 12) and (position.last_sale_price > 1.013 * c.SVXYprice)
             ):
                 c.SellAndWait = 1
             elif (
@@ -781,41 +893,3 @@ def handle_data(context, data):
             for stock in c.portfolio.positions:
                 cancel_open_orders_for(context, data, stock)
                 TarPer(context, data, stock, 0.00)
-
-def CherryPickerClose(context,data):    
-    
-    c = context
-    vxx_prices = data.history(c.VXX, "high", c.wvf_length*2, "1d")
-    vxx_lows = data.history(c.VXX, "low", c.wvf_length*2, "1d")
-    vxx_highest = vxx_prices.rolling(window = c.wvf_length, center=False).max()
-    WVF = ((vxx_highest - vxx_lows)/(vxx_highest)) * 100
-
-    rsi = talib.RSI(vxx_prices, timeperiod=c.rsi_length)
-    
-    c.SmoothedWVF1 = talib.EMA(WVF, timeperiod=c.ema1) 
-    c.SmoothedWVF2 = talib.EMA(WVF, timeperiod=c.ema2)
-    
-    ## BUY RULES
-    #if WVF crosses over smoothwvf1 and wvf < smoothwvf2
-    if ((WVF[-1] > c.SmoothedWVF1[-1] and WVF[-2] < c.SmoothedWVF1[-2] and WVF[-1] < c.SmoothedWVF2[-1]) or (c.SmoothedWVF1[-2] < c.SmoothedWVF2[-2] and c.SmoothedWVF1[-1] > c.SmoothedWVF2[-1]) or (WVF[-1] > c.SmoothedWVF1[-1] and WVF[-2] < c.SmoothedWVF1[-2] and WVF[-1] > c.SmoothedWVF2[-1] and WVF[-2] < c.SmoothedWVF2[-2])):
-        c.sell = False
-        for stock in c.portfolio.positions:
-            if stock is not c.XIV:
-                cancel_open_orders_for(context, data, stock)
-                TarPer(context, data, stock, 0.00)
-            else:
-                cancel_open_orders_for(context, data, stock)
-                TarPer(context, data, stock, 1.00)
-      
-    ## SELL RULES
-    if c.portfolio.positions[c.XIV].amount > 0:
-        #if rsi crosses over rsi_trigger
-        if rsi[-2] < c.rsi_trigger and rsi[-1] > c.rsi_trigger:
-            c.sell = True
-            
-        #if wvf crosses under smoothwvf2: sell
-        elif WVF[-2] > c.SmoothedWVF2[-2] and WVF[-1] < c.SmoothedWVF2[-1]:
-            c.sell = True
-
-        else:
-            c.sell = False
