@@ -886,6 +886,7 @@ def handle_data(context, data):
             ):
                 c.SellAndWait = 3
 
+
         ##
         # Sell and Wait
         ##
